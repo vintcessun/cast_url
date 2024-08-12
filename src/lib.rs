@@ -21,7 +21,7 @@ impl Media{
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RenderPlay{
     render: Render,
     name: String,
