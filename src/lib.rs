@@ -42,6 +42,9 @@ impl RenderPlay{
     pub fn name(&self)->String{
         self.name.clone()
     }
+    pub fn full_name(&self)->String{
+        format!("{}",self.render)
+    }
 }
 
 fn play(render: &Render, url:&str) -> Result<Render>{
