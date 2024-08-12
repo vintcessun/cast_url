@@ -1,0 +1,13 @@
+[package]
+name = "cast_url"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "一个封装好的自用库"
+
+[dependencies]
+crab-dlna = "0.2.1"
+xml = "0.8.20"
+anyhow = "1.0.86"
+log = "0.4.22"
+tokio = { version = "1", features = ["full"] }
