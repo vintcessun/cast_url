@@ -1,171 +1,229 @@
-use crab_dlna::{Render,Error};
-use xml::escape::escape_str_attribute;
-use log::{error, info, warn, debug};
+use anyhow::anyhow;
 use anyhow::Result;
+use futures_util::stream::{Stream, StreamExt, TryStreamExt};
+use log::{debug, error, info, warn};
+use rupnp::ssdp::{SearchTarget, URN};
+use std::str::FromStr;
+use std::time::Duration;
 
+const STOP: [&str; 2] = ["STOPPED", "NO_MEDIA_PRESENT"];
 const PAYLOAD_PLAY: &str = r#"
     <InstanceID>0</InstanceID>
     <Speed>1</Speed>
 "#;
+const AV_TRANSPORT: URN = URN::service("schemas-upnp-org", "AVTransport", 1);
 
-#[derive(Debug,Clone)]
-struct Media{
-    video_url:String,
-    video_type:String,
-}
-impl Media{
-    fn new(url:&str)->Self{
-        let t = url.split('.').collect::<Vec<_>>();
-        let video_type = t[t.len()-1];
-        Self{video_url:url.to_string(),video_type:video_type.to_string()}
-    }
+macro_rules! format_device {
+    ($device:expr) => {{
+        format!(
+            "[{}] {} @ {}",
+            $device.device_type(),
+            $device.friendly_name(),
+            $device.url()
+        )
+    }};
 }
 
 #[derive(Debug, Clone)]
-pub struct RenderPlay{
-    render: Render,
-    name: String,
+pub struct Render {
+    /// The UPnP device
+    pub device: rupnp::Device,
+    /// The AVTransport service
+    pub service: rupnp::Service,
 }
 
-impl RenderPlay{
-    pub fn new(render: Render)->Self{
-        let name = render.device.friendly_name().to_string();
-        Self{render,name}
+impl Render {
+    pub fn discover(duration_secs: u64) -> Result<Vec<Self>> {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async { Self::_discover(duration_secs).await })
     }
-    pub fn play(&mut self, url: &str)->Result<()>{
-        self.render = play(&self.render, url)?;
-        Ok(())
-    }
-    pub fn is_stopped(&self)->bool{
-        is_stopped(&self.render)
-    }
-    pub fn name(&self)->String{
-        self.name.clone()
-    }
-    pub fn full_name(&self)->String{
-        format!("{}",self.render)
-    }
-}
 
-fn play(render: &Render, url:&str) -> Result<Render>{
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            warn!("开始投屏 url = {}",&url);
-            _play(render.clone(), Media::new(url)).await
-        })
-}
-
-async fn _play(render: Render, streaming_server: Media) -> Result<Render> {
-    info!("投屏{}",&streaming_server.video_url);
-    //let subtitle_uri = streaming_server.video_url.clone();
-    let payload_subtitle = escape_str_attribute(
-        format!(r###"
-            <DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"
-                xmlns:dc="http://purl.org/dc/elements/1.1/" 
-                xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" 
-                xmlns:dlna="urn:schemas-dlna-org:metadata-1-0/" 
-                xmlns:sec="http://www.sec.co.kr/" 
-                xmlns:xbmc="urn:schemas-xbmc-org:metadata-1-0/">
-                <item id="0" parentID="-1" restricted="1">
-                    <dc:title>nano-dlna Video</dc:title>
-                    <res protocolInfo="http-get:*:video/{type_video}:" xmlns:pv="http://www.pv.com/pvns/" pv:subtitleFileUri="{uri_sub}" pv:subtitleFileType="{type_sub}">{uri_video}</res>
-                    <res protocolInfo="http-get:*:text/srt:*">{uri_sub}</res>
-                    <res protocolInfo="http-get:*:smi/caption:*">{uri_sub}</res>
-                    <sec:CaptionInfoEx sec:type="{type_sub}">{uri_sub}</sec:CaptionInfoEx>
-                    <sec:CaptionInfo sec:type="{type_sub}">{uri_sub}</sec:CaptionInfo>
-                    <upnp:class>object.item.videoItem.movie</upnp:class>
-                </item>
-            </DIDL-Lite>
-            "###,
-            uri_video = &streaming_server.video_url,
-            type_video = &streaming_server.video_type,
-            uri_sub = &streaming_server.video_url,
-            type_sub = &streaming_server.video_type
-        ).as_str()).to_string();
-    //println!("Subtitle payload");
-
-    let payload_setavtransporturi = format!(
-        r#"
-        <InstanceID>0</InstanceID>
-        <CurrentURI>{}</CurrentURI>
-        <CurrentURIMetaData>{}</CurrentURIMetaData>
-        "#,
-        streaming_server.video_url.clone(),
-        payload_subtitle
-    );
-    //println!("SetAVTransportURI payload");
-
-    //info!("Starting media streaming server...");
-    //let streaming_server_handle = tokio::spawn(async move { streaming_server.run().await });
-
-    //println!("Setting Video URI");
-    render
-        .service
-        .action(
-            render.device.url(),
-            "SetAVTransportURI",
-            payload_setavtransporturi.as_str(),
-        )
-        .await
-        .map_err(Error::DLNASetAVTransportURIError)?;
-
-    //println!("Playing video");
-    render
-        .service
-        .action(render.device.url(), "Play", PAYLOAD_PLAY)
-        .await
-        .map_err(Error::DLNAPlayError)?;
-
-    //streaming_server_handle
-    //    .await
-    //    .map_err(Error::DLNAStreamingError)?;
-
-    Ok(render)
-}
-
-fn is_stopped(render:&Render)->bool{
-    let stop = ["STOPPED","NO_MEDIA_PRESENT"];
-    let ret = tokio::runtime::Builder::new_multi_thread()
-    .enable_all()
-    .build()
-    .unwrap()
-    .block_on(async {
-        loop{
-            match render
-            .service
-            .action(render.device.url(),"GetTransportInfo",PAYLOAD_PLAY)
-            .await
-            .map_err(Error::DLNAPlayError){
-                Ok(ret)=>{break ret;},
-                Err(_)=>{error!("状态查询失败正在重试")},
+    async fn from_device(device: rupnp::Device) -> Option<Self> {
+        debug!(
+            "Retrieving AVTransport service from device '{}'",
+            format_device!(device)
+        );
+        match device.find_service(&AV_TRANSPORT) {
+            Some(service) => Some(Self {
+                device: device.clone(),
+                service: service.clone(),
+            }),
+            None => {
+                warn!("No AVTransport service found on {}", device.friendly_name());
+                None
             }
         }
-        //println!("{:?}",&ret);
-    });
-    debug!("获取到 ret = {:?}",&ret);
-    if ret.is_empty(){
-        return true;
     }
-    else if ret.contains_key("CurrentTransportState"){
-        let state = ret["CurrentTransportState"].clone();
-        debug!("DLNA设备状态{}",&state);
-        if stop.contains(&state.as_str()){
-            return true;
+
+    pub async fn _discover(duration_secs: u64) -> Result<Vec<Self>> {
+        info!("查找设备, 请等待 {} 秒...", duration_secs);
+        let search_target = SearchTarget::URN(AV_TRANSPORT);
+        let devices =
+            upnp_discover(&search_target, Duration::from_secs(duration_secs), Some(20)).await?;
+
+        pin_utils::pin_mut!(devices);
+
+        let mut renders = Vec::new();
+
+        while let Some(result) = devices.next().await {
+            match result {
+                Ok(device) => {
+                    debug!("找到设备 {}", format_device!(device));
+                    if let Some(render) = Self::from_device(device).await {
+                        renders.push(render);
+                    };
+                }
+                Err(e) => {
+                    debug!("在查找的时候出现一个错误 {}", e);
+                }
+            }
         }
+
+        Ok(renders)
     }
-    false
+
+    pub fn is_stopped(&self) -> bool {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { self._is_stopped().await })
+    }
+
+    pub async fn _is_stopped(&self) -> bool {
+        let ret = loop {
+            match self
+                .service
+                .action(self.device.url(), "GetTransportInfo", PAYLOAD_PLAY)
+                .await
+            {
+                Ok(ret) => {
+                    break ret;
+                }
+                Err(_) => {
+                    error!("状态查询失败正在重试")
+                }
+            }
+        };
+        debug!("获取到 ret = {:?}", &ret);
+        if ret.is_empty() {
+            return true;
+        } else if ret.contains_key("CurrentTransportState") {
+            let state = ret["CurrentTransportState"].clone();
+            debug!("DLNA设备状态{}", &state);
+            if STOP.contains(&state.as_str()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub async fn _play(&self, url: &str) -> Result<()> {
+        info!("投屏{}", url);
+
+        let payload_setavtransporturi = format!(
+            r#"
+            <InstanceID>0</InstanceID>
+            <CurrentURI>{}</CurrentURI>
+            <CurrentURIMetaData>my-dlna</CurrentURIMetaData>
+            "#,
+            url,
+        );
+
+        println!("target1");
+        println!("{}", self.device.url());
+        let uri = rupnp::http::Uri::from_str(
+            format!("{}", self.device.url())
+                .replace("http://192.168.1.100:49152/", "http://192.168.1.100:6095/")
+                .as_str(),
+        )?;
+        println!("{}", payload_setavtransporturi.as_str());
+        let ret = match self
+            .service
+            .action(
+                &uri,
+                "SetAVTransportURI",
+                payload_setavtransporturi.as_str(),
+            )
+            .await
+        {
+            Ok(ret) => ret,
+            Err(e) => {
+                return Err(anyhow!("DLNASetAVTransportURIError e={}", e));
+            }
+        };
+
+        println!("{:?}", ret);
+
+        println!("target2");
+        let ret = match self
+            .service
+            .action(self.device.url(), "Play", PAYLOAD_PLAY)
+            .await
+        {
+            Ok(ret) => ret,
+            Err(e) => {
+                return Err(anyhow!("DLNAPlayError e={}", e));
+            }
+        };
+        println!("{:?}", ret);
+        println!("target3");
+
+        Ok(())
+    }
 }
 
-pub fn discover()->Result<Vec<Render>>{
-    tokio::runtime::Builder::new_multi_thread()
-    .enable_all()
-    .build()
-    .unwrap()
-    .block_on(async {
-        let renders_discovered: Vec<Render> = Render::discover(20).await?;
-        Ok(renders_discovered)
-    })
+impl std::fmt::Display for Render {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "[{}][{}] {} @ {}",
+            self.device.device_type(),
+            self.service.service_type(),
+            self.device.friendly_name(),
+            self.device.url()
+        )
+    }
+}
+
+async fn upnp_discover(
+    search_target: &SearchTarget,
+    timeout: Duration,
+    ttl: Option<u32>,
+) -> Result<impl Stream<Item = Result<rupnp::Device, rupnp::Error>>> {
+    Ok(ssdp_client::search(search_target, timeout, 10, ttl)
+        .await?
+        .map_err(rupnp::Error::SSDPError)
+        .map(|res| Ok(res?.location().parse()?))
+        .and_then(rupnp::Device::from_url))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::io::stdin;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test() {
+        let url = "https://www.w3schools.com/html/movie.mp4";
+        println!("将要搜索renders");
+        let discovered_devices = loop {
+            if let Ok(ret) = Render::_discover(30).await {
+                if !ret.is_empty() {
+                    break ret;
+                }
+            }
+            println!("搜索不到");
+        };
+        for (i, render) in discovered_devices.iter().enumerate() {
+            println!("[{}]{}", i, render);
+        }
+        let target_render = discovered_devices[1].clone();
+        println!("获取到render = {}", &target_render);
+        target_render._play(url).await.unwrap();
+    }
 }
