@@ -58,7 +58,7 @@ impl Render {
     }
 
     pub async fn _discover(duration_secs: u64) -> Result<Vec<Self>> {
-        info!("查找设备, 请等待 {} 秒...", duration_secs);
+        info!("查找设备, 请等待 {duration_secs} 秒...");
         let search_target = SearchTarget::URN(AV_TRANSPORT);
         let devices =
             upnp_discover(&search_target, Duration::from_secs(duration_secs), Some(20)).await?;
@@ -126,10 +126,9 @@ impl Render {
         let payload_setavtransporturi = format!(
             r#"
             <InstanceID>0</InstanceID>
-            <CurrentURI>{}</CurrentURI>
+            <CurrentURI>{url}</CurrentURI>
             <CurrentURIMetaData>my-dlna</CurrentURIMetaData>
             "#,
-            url,
         );
 
         println!("target1");
@@ -155,7 +154,7 @@ impl Render {
             }
         };
 
-        println!("{:?}", ret);
+        println!("{ret:?}");
 
         println!("target2");
         let ret = match self
